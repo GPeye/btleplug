@@ -23,6 +23,7 @@ use std::convert::TryInto;
 use std::fmt::{self, Debug, Formatter};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use windows::Devices::Bluetooth::BluetoothLEDevice;
 
 /// Implementation of [api::Central](crate::api::Central).
 #[derive(Clone)]
@@ -59,15 +60,15 @@ impl Central for Adapter {
         // TODO: implement filter
         let watcher = self.watcher.lock().unwrap();
         let manager = self.manager.clone();
-        watcher.start(Box::new(move |args| {
+        watcher.start(Arc::new(move |args: &BluetoothLEDevice| {
             let bluetooth_address = args.BluetoothAddress().unwrap();
             let address: BDAddr = bluetooth_address.try_into().unwrap();
             if let Some(mut entry) = manager.peripheral_mut(&address.into()) {
-                entry.value_mut().update_properties(args);
+                entry.value_mut().update_properties(&args);
                 manager.emit(CentralEvent::DeviceUpdated(address.into()));
             } else {
                 let peripheral = Peripheral::new(Arc::downgrade(&manager), address);
-                peripheral.update_properties(args);
+                peripheral.update_properties(&args);
                 manager.add_peripheral(peripheral);
                 manager.emit(CentralEvent::DeviceDiscovered(address.into()));
             }

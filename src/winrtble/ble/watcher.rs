@@ -11,13 +11,21 @@
 //
 // Copyright (c) 2014 The Rust Project Developers
 
-use crate::{Error, Result};
-use windows::{Devices::Bluetooth::Advertisement::*, Foundation::TypedEventHandler};
+use std::sync::Arc;
 
-pub type AdvertismentEventHandler = Box<dyn Fn(&BluetoothLEAdvertisementReceivedEventArgs) + Send>;
+use crate::{Error, Result};
+use windows::{
+    Devices::Bluetooth::Advertisement::*,
+    Devices::{Bluetooth::BluetoothConnectionStatus, Enumeration::DeviceInformation},
+    Devices::{Bluetooth::BluetoothLEDevice, Enumeration::DeviceWatcher},
+    Foundation::TypedEventHandler,
+};
+
+pub type DeviceWatchAddedEventHandler = Arc<dyn Fn(&BluetoothLEDevice) + Send + Sync>;
 
 pub struct BLEWatcher {
-    watcher: BluetoothLEAdvertisementWatcher,
+    bt_ad_watcher: BluetoothLEAdvertisementWatcher,
+    bt_device_watcher: DeviceWatcher,
 }
 
 impl From<windows::core::Error> for Error {
@@ -29,33 +37,92 @@ impl From<windows::core::Error> for Error {
 impl BLEWatcher {
     pub fn new() -> Self {
         let ad = BluetoothLEAdvertisementFilter::new().unwrap();
-        let watcher = BluetoothLEAdvertisementWatcher::Create(&ad).unwrap();
-        BLEWatcher { watcher }
+        let bt_ad_watcher = BluetoothLEAdvertisementWatcher::Create(&ad).unwrap();
+
+        let aqs = BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(
+            BluetoothConnectionStatus::Connected,
+        )
+        .unwrap();
+
+        let bt_device_watcher = DeviceInformation::CreateWatcherAqsFilter(&aqs).unwrap();
+        BLEWatcher {
+            bt_ad_watcher,
+            bt_device_watcher,
+        }
     }
 
-    pub fn start(&self, on_received: AdvertismentEventHandler) -> Result<()> {
-        self.watcher
+    pub fn start(&self, on_new_device: DeviceWatchAddedEventHandler) -> Result<()> {
+        self.bt_ad_watcher
             .SetScanningMode(BluetoothLEScanningMode::Active)
             .unwrap();
-        let handler: TypedEventHandler<
+
+        let bt_ad_handler: TypedEventHandler<
             BluetoothLEAdvertisementWatcher,
             BluetoothLEAdvertisementReceivedEventArgs,
-        > = TypedEventHandler::new(
+        > = TypedEventHandler::new({
+            let on_new_device = on_new_device.clone();
             move |_sender, args: &Option<BluetoothLEAdvertisementReceivedEventArgs>| {
                 if let Some(args) = args {
-                    on_received(args);
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let bluetooth_address = args.BluetoothAddress().unwrap();
+                    let d = rt.block_on(async {
+                        BluetoothLEDevice::FromBluetoothAddressAsync(
+                            bluetooth_address.try_into().unwrap(),
+                        )
+                        .unwrap()
+                        .await
+                    });
+                    match d {
+                        Ok(device) => {
+                            on_new_device(&device);
+                        }
+                        _ => {}
+                    }
                 }
                 Ok(())
-            },
-        );
+            }
+        });
 
-        self.watcher.Received(&handler)?;
-        self.watcher.Start()?;
+        let bt_device_handler: TypedEventHandler<DeviceWatcher, DeviceInformation> =
+            TypedEventHandler::new({
+                let on_new_device = on_new_device.clone();
+                move |_sender, args: &Option<DeviceInformation>| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    if let Some(args) = args {
+                        let id = args.Id().unwrap();
+                        let d = rt.block_on(async {
+                            BluetoothLEDevice::FromIdAsync(&id.try_into().unwrap())
+                                .unwrap()
+                                .await
+                        });
+                        match d {
+                            Ok(device) => {
+                                on_new_device(&device);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(())
+                }
+            });
+
+        self.bt_ad_watcher.Received(&bt_ad_handler)?;
+        self.bt_ad_watcher.Start()?;
+
+        self.bt_device_watcher.Added(&bt_device_handler)?;
+        self.bt_device_watcher.Start()?;
         Ok(())
     }
 
     pub fn stop(&self) -> Result<()> {
-        self.watcher.Stop()?;
+        self.bt_ad_watcher.Stop()?;
+        self.bt_device_watcher.Stop()?;
         Ok(())
     }
 }

@@ -44,7 +44,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use std::sync::Weak;
-use windows::Devices::Bluetooth::{Advertisement::*, BluetoothAddressType};
+use windows::Devices::Bluetooth::{Advertisement::*, BluetoothAddressType, BluetoothLEDevice};
 
 #[cfg_attr(
     feature = "serde",
@@ -122,11 +122,11 @@ impl Peripheral {
         }
     }
 
-    pub(crate) fn update_properties(&self, args: &BluetoothLEAdvertisementReceivedEventArgs) {
-        let advertisement = args.Advertisement().unwrap();
+    pub(crate) fn update_properties(&self, args: &BluetoothLEDevice) {
+        //let advertisement = args.Advertisement().unwrap();
 
         // Advertisements are cumulative: set/replace data only if it's set
-        if let Ok(name) = advertisement.LocalName() {
+        if let Ok(name) = args.Name() {
             if !name.is_empty() {
                 // XXX: we could probably also assume that we've seen the
                 // advertisement before and speculatively take a read lock
@@ -136,82 +136,96 @@ impl Peripheral {
                 *local_name_guard = Some(name.to_string());
             }
         }
-        if let Ok(manufacturer_data) = advertisement.ManufacturerData() {
-            let mut manufacturer_data_guard = self.shared.latest_manufacturer_data.write().unwrap();
+        // if let Ok(manufacturer_data) = advertisement.ManufacturerData() {
+        //     let mut manufacturer_data_guard = self.shared.latest_manufacturer_data.write().unwrap();
 
-            *manufacturer_data_guard = manufacturer_data
-                .into_iter()
-                .map(|d| {
-                    let manufacturer_id = d.CompanyId().unwrap();
-                    let data = utils::to_vec(&d.Data().unwrap());
+        //     *manufacturer_data_guard = manufacturer_data
+        //         .into_iter()
+        //         .map(|d| {
+        //             let manufacturer_id = d.CompanyId().unwrap();
+        //             let data = utils::to_vec(&d.Data().unwrap());
 
-                    (manufacturer_id, data)
-                })
-                .collect();
+        //             (manufacturer_id, data)
+        //         })
+        //         .collect();
 
-            // Emit event of newly received advertisement
-            self.emit_event(CentralEvent::ManufacturerDataAdvertisement {
-                id: self.shared.address.into(),
-                manufacturer_data: manufacturer_data_guard.clone(),
-            });
-        }
+        //     // Emit event of newly received advertisement
+        //     self.emit_event(CentralEvent::ManufacturerDataAdvertisement {
+        //         id: self.shared.address.into(),
+        //         manufacturer_data: manufacturer_data_guard.clone(),
+        //     });
+        // }
 
         // The Windows Runtime API (as of 19041) does not directly expose Service Data as a friendly API (like Manufacturer Data above)
         // Instead they provide data sections for access to raw advertising data. That is processed here.
-        if let Ok(data_sections) = advertisement.DataSections() {
-            // See if we have any advertised service data before taking a lock to update...
-            let mut found_service_data = false;
-            for section in &data_sections {
-                match section.DataType().unwrap() {
-                    advertisement_data_type::SERVICE_DATA_16_BIT_UUID
-                    | advertisement_data_type::SERVICE_DATA_32_BIT_UUID
-                    | advertisement_data_type::SERVICE_DATA_128_BIT_UUID => {
-                        found_service_data = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if found_service_data {
-                let mut service_data_guard = self.shared.latest_service_data.write().unwrap();
+        // if let Ok(data_sections) = advertisement.DataSections() {
+        //     // See if we have any advertised service data before taking a lock to update...
+        //     let mut found_service_data = false;
+        //     for section in &data_sections {
+        //         match section.DataType().unwrap() {
+        //             advertisement_data_type::SERVICE_DATA_16_BIT_UUID
+        //             | advertisement_data_type::SERVICE_DATA_32_BIT_UUID
+        //             | advertisement_data_type::SERVICE_DATA_128_BIT_UUID => {
+        //                 found_service_data = true;
+        //                 break;
+        //             }
+        //             _ => {}
+        //         }
+        //     }
+        //     if found_service_data {
+        //         let mut service_data_guard = self.shared.latest_service_data.write().unwrap();
 
-                *service_data_guard = data_sections
-                    .into_iter()
-                    .filter_map(|d| {
-                        let data = utils::to_vec(&d.Data().unwrap());
+        //         *service_data_guard = data_sections
+        //             .into_iter()
+        //             .filter_map(|d| {
+        //                 let data = utils::to_vec(&d.Data().unwrap());
 
-                        match d.DataType().unwrap() {
-                            advertisement_data_type::SERVICE_DATA_16_BIT_UUID => {
-                                let (uuid, data) = data.split_at(2);
-                                let uuid =
-                                    uuid_from_u16(u16::from_le_bytes(uuid.try_into().unwrap()));
-                                Some((uuid, data.to_owned()))
-                            }
-                            advertisement_data_type::SERVICE_DATA_32_BIT_UUID => {
-                                let (uuid, data) = data.split_at(4);
-                                let uuid =
-                                    uuid_from_u32(u32::from_le_bytes(uuid.try_into().unwrap()));
-                                Some((uuid, data.to_owned()))
-                            }
-                            advertisement_data_type::SERVICE_DATA_128_BIT_UUID => {
-                                let (uuid, data) = data.split_at(16);
-                                let uuid = Uuid::from_slice(uuid).unwrap();
-                                Some((uuid, data.to_owned()))
-                            }
-                            _ => None,
-                        }
-                    })
-                    .collect();
+        //                 match d.DataType().unwrap() {
+        //                     advertisement_data_type::SERVICE_DATA_16_BIT_UUID => {
+        //                         let (uuid, data) = data.split_at(2);
+        //                         let uuid =
+        //                             uuid_from_u16(u16::from_le_bytes(uuid.try_into().unwrap()));
+        //                         Some((uuid, data.to_owned()))
+        //                     }
+        //                     advertisement_data_type::SERVICE_DATA_32_BIT_UUID => {
+        //                         let (uuid, data) = data.split_at(4);
+        //                         let uuid =
+        //                             uuid_from_u32(u32::from_le_bytes(uuid.try_into().unwrap()));
+        //                         Some((uuid, data.to_owned()))
+        //                     }
+        //                     advertisement_data_type::SERVICE_DATA_128_BIT_UUID => {
+        //                         let (uuid, data) = data.split_at(16);
+        //                         let uuid = Uuid::from_slice(uuid).unwrap();
+        //                         Some((uuid, data.to_owned()))
+        //                     }
+        //                     _ => None,
+        //                 }
+        //             })
+        //             .collect();
 
-                // Emit event of newly received advertisement
-                self.emit_event(CentralEvent::ServiceDataAdvertisement {
-                    id: self.shared.address.into(),
-                    service_data: service_data_guard.clone(),
-                });
-            }
-        }
+        //         // Emit event of newly received advertisement
+        //         self.emit_event(CentralEvent::ServiceDataAdvertisement {
+        //             id: self.shared.address.into(),
+        //             service_data: service_data_guard.clone(),
+        //         });
+        //     }
+        // }
 
-        if let Ok(services) = advertisement.ServiceUuids() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let GattDeviceServicesResult = rt
+            .block_on(async { args.GetGattServicesAsync().unwrap().await })
+            .unwrap();
+        let uuids = GattDeviceServicesResult
+            .Services()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.Uuid().unwrap())
+            .collect::<Vec<_>>();
+
+        if uuids.len() > 0 {
             let mut found_new_service = false;
 
             // Limited scope for read-only lock...
@@ -220,7 +234,7 @@ impl Peripheral {
 
                 // In all likelihood we've already seen all the advertised services before so lets
                 // check to see if we can avoid taking the write lock and emitting an event...
-                for uuid in &services {
+                for uuid in &uuids {
                     if !services_guard_ro.contains(&utils::to_uuid(&uuid)) {
                         found_new_service = true;
                         break;
@@ -236,7 +250,7 @@ impl Peripheral {
                 // a consistent (128bit) format. Considering that we don't practically know
                 // whether the aggregate list is ever complete we always union the IDs with the
                 // IDs already tracked.
-                for uuid in services {
+                for uuid in uuids {
                     services_guard.insert(utils::to_uuid(&uuid));
                 }
 
@@ -256,20 +270,20 @@ impl Peripheral {
             };
         }
 
-        if let Ok(tx_reference) = args.TransmitPowerLevelInDBm() {
-            // IReference is (ironically) a crazy foot gun in Rust since it very easily
-            // panics if you look at it wrong. Calling GetInt16(), IsNumericScalar() or Type()
-            // all panic here without returning a Result as documented.
-            // Value() is apparently the _right_ way to extract something from an IReference<T>...
-            if let Ok(tx) = tx_reference.Value() {
-                let mut tx_power_level_guard = self.shared.last_tx_power_level.write().unwrap();
-                *tx_power_level_guard = Some(tx);
-            }
-        }
-        if let Ok(rssi) = args.RawSignalStrengthInDBm() {
-            let mut rssi_guard = self.shared.last_rssi.write().unwrap();
-            *rssi_guard = Some(rssi);
-        }
+        // if let Ok(tx_reference) = args.TransmitPowerLevelInDBm() {
+        //     // IReference is (ironically) a crazy foot gun in Rust since it very easily
+        //     // panics if you look at it wrong. Calling GetInt16(), IsNumericScalar() or Type()
+        //     // all panic here without returning a Result as documented.
+        //     // Value() is apparently the _right_ way to extract something from an IReference<T>...
+        //     if let Ok(tx) = tx_reference.Value() {
+        //         let mut tx_power_level_guard = self.shared.last_tx_power_level.write().unwrap();
+        //         *tx_power_level_guard = Some(tx);
+        //     }
+        // }
+        // if let Ok(rssi) = args.RawSignalStrengthInDBm() {
+        //     let mut rssi_guard = self.shared.last_rssi.write().unwrap();
+        //     *rssi_guard = Some(rssi);
+        // }
     }
 
     fn emit_event(&self, event: CentralEvent) {
